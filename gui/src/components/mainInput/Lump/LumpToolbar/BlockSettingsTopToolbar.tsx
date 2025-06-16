@@ -2,6 +2,7 @@ import {
   BookOpenIcon,
   ChatBubbleLeftIcon,
   ChevronLeftIcon,
+  CircleStackIcon,
   CubeIcon,
   EllipsisHorizontalIcon,
   ExclamationTriangleIcon,
@@ -23,8 +24,11 @@ import { ErrorsSectionTooltip } from "../sections/errors/ErrorsSectionTooltip";
 import { McpSectionTooltip } from "../sections/mcp/MCPTooltip";
 import { ToolsSectionTooltip } from "../sections/tool-policies/ToolPoliciesSectionTooltip";
 
+import { IndexingProgressUpdate } from "core";
 import { usesFreeTrialApiKey } from "core/config/usesFreeTrialApiKey";
 import type { FreeTrialStatus } from "core/control-plane/client";
+import { useWebviewListener } from "../../../../hooks/useWebviewListener";
+import { CodebaseIndexTooltip } from "../sections/CodebaseIndexTooltip";
 
 interface BlockSettingsToolbarIcon {
   title: string;
@@ -147,11 +151,47 @@ export function BlockSettingsTopToolbar() {
 
   const configError = useAppSelector((store) => store.config.configError);
   const config = useAppSelector((state) => state.config.config);
+  const [indexStatus, setIndexStatus] = useState<IndexingProgressUpdate>({
+    desc: "Loading indexing config",
+    progress: 0.0,
+    status: "loading",
+  });
   const ideMessenger = useContext(IdeMessengerContext);
 
   const [freeTrialStatus, setFreeTrialStatus] =
     useState<FreeTrialStatus | null>(null);
   const isUsingFreeTrial = usesFreeTrialApiKey(config);
+
+  useWebviewListener(
+    "indexProgress",
+    async (data) => {
+      setIndexStatus(data);
+    },
+    [setIndexStatus],
+  );
+
+  let indexColorClassName;
+  switch (indexStatus.status) {
+    case "loading":
+    case "indexing":
+      indexColorClassName = "text-warning";
+      break;
+    case "paused":
+      indexColorClassName = "text-badge";
+      break;
+    case "done":
+      indexColorClassName = "text-success";
+      break;
+    case "failed":
+    case "disabled":
+    case "cancelled":
+      indexColorClassName = "text-error";
+      break;
+  }
+
+  const codebaseIndexEnabled =
+    config.contextProviders.some((provider) => provider.title === "codebase") &&
+    !config.disableIndexing;
 
   useEffect(() => {
     const fetchFreeTrialStatus = () => {
@@ -192,6 +232,14 @@ export function BlockSettingsTopToolbar() {
       section.id !== "error" ||
       (section.id === "error" && configError && configError?.length > 0),
   );
+  if (codebaseIndexEnabled) {
+    visibleSections.push({
+      id: "index",
+      title: "Codebase Index",
+      tooltip: <CodebaseIndexTooltip status={indexStatus} />,
+      icon: CircleStackIcon,
+    });
+  }
 
   return (
     <div className="flex flex-1 items-center justify-between gap-2">
@@ -219,9 +267,12 @@ export function BlockSettingsTopToolbar() {
                   isSelected={selectedSection === section.id}
                   onClick={() =>
                     setSelectedSection(
-                      selectedSection === section.id ? null : section.id,
+                      selectedSection === section.id || section.id === "index"
+                        ? null
+                        : section.id,
                     )
                   }
+                  className={section.id === "index" ? indexColorClassName : ""}
                 />
               ))}
             </div>
