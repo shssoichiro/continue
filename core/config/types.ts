@@ -67,6 +67,8 @@ declare global {
     title: string;
     icon?: string;
     url?: string;
+    indexSize?: number; // Size in bytes
+    indexedCount?: number; // File count (codebase) or page count (docs)
   }
   
   export type PromptTemplateFunction = (
