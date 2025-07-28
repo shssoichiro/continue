@@ -31,6 +31,10 @@ import {
   PathAndCacheKey,
   RefreshIndexResults,
 } from "./types.js";
+import {
+  clearCodebaseCache,
+  getCodebaseIndexSize,
+} from "./utils/sizeCalculation.js";
 import { walkDirAsync } from "./walkDir.js";
 
 export class PauseToken {
@@ -119,6 +123,16 @@ export class CodebaseIndexer {
   async clearIndexes() {
     const sqliteFilepath = getIndexSqlitePath();
     const lanceDbFolder = getLanceDbPath();
+
+    // Clear all codebase size caches when clearing indexes
+    try {
+      const workspaceDirs = await this.ide.getWorkspaceDirs();
+      for (const dir of workspaceDirs) {
+        clearCodebaseCache(dir);
+      }
+    } catch (err) {
+      console.debug("Failed to clear codebase caches:", err);
+    }
 
     try {
       await fs.unlink(sqliteFilepath);
@@ -415,8 +429,8 @@ export class CodebaseIndexer {
       }
     }
 
-    // Final completion message with preserved warnings
-    yield {
+    // Final completion message with preserved warnings and size data
+    const finalUpdate: IndexingProgressUpdate = {
       progress: 1,
       desc:
         collectedWarnings.length > 0
@@ -425,6 +439,13 @@ export class CodebaseIndexer {
       status: "done",
       warnings: collectedWarnings.length > 0 ? collectedWarnings : undefined,
     };
+
+    // Add size data for the final completion
+    const enhancedFinalUpdate = await this.enhanceProgressWithSizeData(
+      finalUpdate,
+      dirs,
+    );
+    yield enhancedFinalUpdate;
     this.logProgress(beginTime, 0, 1);
   }
 
@@ -650,6 +671,48 @@ export class CodebaseIndexer {
     }
   }
 
+  /**
+   * Calculate and add size data to progress update if indexing is complete
+   */
+  private async enhanceProgressWithSizeData(
+    update: IndexingProgressUpdate,
+    workspaceDirs: string[],
+  ): Promise<IndexingProgressUpdate> {
+    // Only calculate size data for completed indexing to avoid performance impact
+    if (update.status !== "done" || workspaceDirs.length === 0) {
+      return update;
+    }
+
+    try {
+      // Use the first workspace directory for size calculation
+      const workspaceDir = workspaceDirs[0];
+      const sizeData = await getCodebaseIndexSize(workspaceDir);
+      return {
+        ...update,
+        indexSize: sizeData.size,
+        indexedCount: sizeData.count,
+      };
+    } catch (err) {
+      // Log error but don't fail the progress update
+      console.debug(`Failed to calculate size for codebase:`, err);
+      return update;
+    }
+  }
+
+  /**
+   * Enhanced progress update with size data for completed indexing
+   */
+  private async updateProgressWithSize(
+    update: IndexingProgressUpdate,
+    workspaceDirs: string[] = [],
+  ) {
+    const enhancedUpdate = await this.enhanceProgressWithSizeData(
+      update,
+      workspaceDirs,
+    );
+    this.updateProgress(enhancedUpdate);
+  }
+
   private async sendIndexingErrorTelemetry(update: IndexingProgressUpdate) {
     console.debug(
       "Indexing failed with error: ",
@@ -699,6 +762,11 @@ export class CodebaseIndexer {
     const localController = new AbortController();
     this.indexingCancellationController = localController;
 
+    // Clear size cache when starting indexing
+    for (const path of paths) {
+      clearCodebaseCache(path);
+    }
+
     for await (const update of this.waitForDBIndex()) {
       this.updateProgress(update);
     }
@@ -714,7 +782,12 @@ export class CodebaseIndexer {
         paths,
         localController.signal,
       )) {
-        this.updateProgress(update);
+        // Use enhanced progress update for completed indexing
+        if (update.status === "done") {
+          await this.updateProgressWithSize(update, paths);
+        } else {
+          this.updateProgress(update);
+        }
 
         if (update.status === "failed") {
           await this.sendIndexingErrorTelemetry(update);
@@ -750,9 +823,17 @@ export class CodebaseIndexer {
     const localController = new AbortController();
     this.indexingCancellationController = localController;
 
+    // Get workspace directories for size calculation
+    const workspaceDirs = await this.ide.getWorkspaceDirs();
+
     try {
       for await (const update of this.refreshFiles(files)) {
-        this.updateProgress(update);
+        // Use enhanced progress update for completed indexing
+        if (update.status === "done") {
+          await this.updateProgressWithSize(update, workspaceDirs);
+        } else {
+          this.updateProgress(update);
+        }
 
         if (update.status === "failed") {
           await this.sendIndexingErrorTelemetry(update);

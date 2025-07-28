@@ -52,6 +52,8 @@ declare global {
       | "disabled"
       | "cancelled";
     debugInfo?: string;
+    indexSize?: number; // Size in bytes
+    indexedCount?: number; // File count
   }
   
   // This is more or less a V2 of IndexingProgressUpdate for docs etc.

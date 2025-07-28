@@ -37,6 +37,7 @@ import { runLanceMigrations, runSqliteMigrations } from "./migrations";
 
 import type * as LanceType from "vectordb";
 import { LLMError } from "../../llm";
+import { clearDocsCache, getDocsIndexSize } from "../utils/sizeCalculation";
 import { DocsCache, SiteIndexingResults } from "./DocsCache";
 
 // Purposefully lowercase because lancedb converts
@@ -246,6 +247,42 @@ export default class DocsService {
     this.messenger?.send("indexing/statusUpdate", update);
   }
 
+  /**
+   * Calculate and add size data to status update if indexing is complete
+   */
+  private async enhanceStatusWithSizeData(
+    update: IndexingStatus,
+  ): Promise<IndexingStatus> {
+    // Only calculate size data for completed indexing to avoid performance impact
+    if (update.status !== "complete" || !update.embeddingsProviderId) {
+      return update;
+    }
+
+    try {
+      const sizeData = await getDocsIndexSize(
+        update.id,
+        update.embeddingsProviderId,
+      );
+      return {
+        ...update,
+        indexSize: sizeData.size,
+        indexedCount: sizeData.count,
+      };
+    } catch (err) {
+      // Log error but don't fail the status update
+      console.debug(`Failed to calculate size for docs ${update.id}:`, err);
+      return update;
+    }
+  }
+
+  /**
+   * Enhanced status update with size data for completed indexing
+   */
+  async handleStatusUpdateWithSize(update: IndexingStatus) {
+    const enhancedUpdate = await this.enhanceStatusWithSizeData(update);
+    this.handleStatusUpdate(enhancedUpdate);
+  }
+
   // A way for gui to retrieve initial statuses
   async initStatuses(): Promise<void> {
     if (!this.config?.docs) {
@@ -253,7 +290,7 @@ export default class DocsService {
     }
     const metadata = await this.listMetadata();
 
-    this.config.docs?.forEach((doc) => {
+    for (const doc of this.config.docs || []) {
       if (!doc.startUrl) {
         console.error("Invalid config docs entry, no start url", doc.title);
         return;
@@ -281,9 +318,8 @@ export default class DocsService {
         sharedStatus.embeddingsProviderId =
           this.config.selectedModelByRole.embed.embeddingId;
       }
-      const indexedStatus: IndexingStatus = metadata.find(
-        (meta) => meta.startUrl === doc.startUrl,
-      )
+      const isIndexed = metadata.find((meta) => meta.startUrl === doc.startUrl);
+      const indexedStatus: IndexingStatus = isIndexed
         ? {
             ...sharedStatus,
             progress: 0,
@@ -296,8 +332,14 @@ export default class DocsService {
             description: "Complete",
             status: "complete",
           };
-      this.handleStatusUpdate(indexedStatus);
-    });
+
+      // Use enhanced status update for completed docs to include size data
+      if (indexedStatus.status === "complete") {
+        await this.handleStatusUpdateWithSize(indexedStatus);
+      } else {
+        this.handleStatusUpdate(indexedStatus);
+      }
+    }
   }
 
   abort(startUrl: string) {
@@ -463,7 +505,7 @@ export default class DocsService {
       if (cacheHit) {
         console.log(`Successfully loaded cached embeddings for ${startUrl}`);
         // Update status to complete
-        this.handleStatusUpdate({
+        await this.handleStatusUpdateWithSize({
           type: "docs",
           id: startUrl,
           embeddingsProviderId: embeddingId,
@@ -558,7 +600,7 @@ export default class DocsService {
     }
 
     if (indexExists && !forceReindex) {
-      this.handleStatusUpdate({
+      await this.handleStatusUpdateWithSize({
         ...fixedStatus,
         progress: 1,
         description: "Complete",
@@ -590,6 +632,11 @@ export default class DocsService {
 
     try {
       this.docsIndexingQueue.add(startUrl);
+
+      // Clear size cache when starting indexing
+      if (provider?.embeddingId) {
+        clearDocsCache(startUrl, provider.embeddingId);
+      }
 
       // Clear current indexes if reIndexing
       if (indexExists && forceReindex) {
@@ -770,7 +817,7 @@ export default class DocsService {
         favicon,
       });
 
-      this.handleStatusUpdate({
+      await this.handleStatusUpdateWithSize({
         ...fixedStatus,
         description: "Complete",
         status: "complete",
@@ -1104,7 +1151,7 @@ export default class DocsService {
               // We only update title and faviconUrl here
               await this.updateMetadataInSqlite(doc);
               // if get's here, not changed, no update needed, mark as complete
-              this.handleStatusUpdate({
+              await this.handleStatusUpdateWithSize({
                 type: "docs",
                 id: doc.startUrl,
                 embeddingsProviderId:
@@ -1404,6 +1451,15 @@ export default class DocsService {
   async delete(startUrl: string) {
     this.docsIndexingQueue.delete(startUrl);
     this.abort(startUrl);
+
+    // Clear size cache before deleting indexes
+    if (this.config.selectedModelByRole.embed?.embeddingId) {
+      clearDocsCache(
+        startUrl,
+        this.config.selectedModelByRole.embed.embeddingId,
+      );
+    }
+
     await this.deleteIndexes(startUrl);
     this.deleteFromConfig(startUrl);
     this.messenger?.send("refreshSubmenuItems", {
